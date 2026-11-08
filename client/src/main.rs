@@ -896,6 +896,7 @@ impl ServerLink {
             // 仍然能用；只是失去多路复用与连接迁移。
             let attempt = async {
                 let addr = nlink_quic_server_addr(&cfg).await?;
+                info!(server = %cfg.server_addr, target = %addr, transport = "nlink-quic", "准备连接服务端");
                 let (endpoint, conn) =
                     frp::quic::connect_with_alpn(&addr, None, nfrp_common::nlink::ALPN).await?;
                 Ok::<_, anyhow::Error>((addr, endpoint, conn))
@@ -915,6 +916,7 @@ impl ServerLink {
             }
         } else if is_quic(&cfg.transport_protocol) {
             let addr = quic_server_addr(&cfg).await?;
+            info!(server = %cfg.server_addr, target = %addr, transport = "quic", "准备连接服务端");
             let (endpoint, conn) = frp::quic::connect(&addr, None).await?;
             info!(%addr, "QUIC 传输已建立");
             Some((endpoint, conn))
@@ -1178,6 +1180,8 @@ async fn raw_connect(cfg: &ClientConfig) -> Result<BoxStream> {
     let server = format!("{}:{}", cfg.server_addr, cfg.server_port);
     // 系统 / 自定义 DNS 共用 TXT -> IP4P -> 普通 A/AAAA 的解析顺序。
     let addr = server_addr(cfg).await?;
+    info!(%server, target = %addr, transport = %cfg.transport_protocol,
+        via_proxy = !cfg.proxy_url.trim().is_empty(), "服务端地址已解析，准备连接");
     // ★ v0.6.6：`transport.proxyURL` —— 走出站代理时直接拿到一条已建好的隧道流；
     // 不走代理时保持原样（TcpStream + nodelay）——零回归。
     //
@@ -1189,6 +1193,7 @@ async fn raw_connect(cfg: &ClientConfig) -> Result<BoxStream> {
             .await
             .with_context(|| format!("连接 {addr} 失败"))?;
         s.set_nodelay(true).ok();
+        info!(target = %addr, "服务端 TCP 连接已建立");
         Box::pin(s)
     } else {
         debug!(
@@ -1204,14 +1209,17 @@ async fn raw_connect(cfg: &ClientConfig) -> Result<BoxStream> {
         } else {
             addr.ip().to_string()
         };
-        nfrp_common::net_proxy::connect(&cfg.proxy_url, &target_host, addr.port(), None)
-            .await
-            .with_context(|| {
-                format!(
-                    "经代理 {} 连接服务端 {server} 失败",
-                    redact_proxy(&cfg.proxy_url)
-                )
-            })?
+        let stream =
+            nfrp_common::net_proxy::connect(&cfg.proxy_url, &target_host, addr.port(), None)
+                .await
+                .with_context(|| {
+                    format!(
+                        "经代理 {} 连接服务端 {server} 失败",
+                        redact_proxy(&cfg.proxy_url)
+                    )
+                })?;
+        info!(target = %addr, "出站代理隧道已建立（target 为代理目标，非本地 socket 对端）");
+        stream
     };
 
     let name = if cfg.tls_server_name.is_empty() {
@@ -1325,6 +1333,7 @@ async fn raw_connect(cfg: &ClientConfig) -> Result<BoxStream> {
 /// 上层照旧套 yamux（`tcp_mux`），所以控制连接和工作连接共用这一条 KCP 会话。
 async fn kcp_connect(cfg: &ClientConfig) -> Result<BoxStream> {
     let addr = server_addr(cfg).await?;
+    info!(server = %cfg.server_addr, target = %addr, transport = "kcp", "准备连接服务端");
     let sock = Arc::new(
         UdpSocket::bind(if addr.is_ipv4() {
             "0.0.0.0:0"
