@@ -1346,7 +1346,7 @@ mod tests {
         let crt = dir.join("crt.pem");
         let key = dir.join("key.pem");
         std::fs::write(&crt, k.cert.pem()).unwrap();
-        std::fs::write(&key, k.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&key, k.signing_key.serialize_pem()).unwrap();
         (
             crt.to_string_lossy().into_owned(),
             key.to_string_lossy().into_owned(),

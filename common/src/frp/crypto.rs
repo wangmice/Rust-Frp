@@ -14,7 +14,7 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, bail, Result};
 use hkdf::Hkdf;
-use rand::RngCore;
+use rand::TryRngCore;
 use sha2::{Digest, Sha256};
 
 use super::wire::{CRYPTO_RANDOM_SIZE, CRYPTO_TRANSCRIPT_LABEL};
@@ -72,7 +72,9 @@ pub fn derive_control_keys(
 /// 生成 32 字节随机数，base64 后用于 Hello 的 random 字段。
 pub fn random_b64() -> String {
     let mut buf = vec![0u8; CRYPTO_RANDOM_SIZE];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut buf)
+        .expect("OS random source failed while generating Hello random");
     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf)
 }
 
@@ -106,7 +108,9 @@ impl AeadWriter {
         let cipher =
             Aes256Gcm::new_from_slice(key).map_err(|e| anyhow!("AES-256-GCM 初始化失败: {e}"))?;
         let mut nonce = [0u8; NONCE_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut nonce)
+            .map_err(|e| anyhow!("OS random source failed while generating AEAD nonce: {e}"))?;
         Ok(Self {
             cipher,
             stream_nonce: nonce,

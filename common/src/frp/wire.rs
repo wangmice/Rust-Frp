@@ -4,7 +4,7 @@
 
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use rand::RngCore;
+use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 
 /// v2 协议魔术字：`FRP` + 版本号 2 + `\r\n`。
@@ -145,7 +145,9 @@ pub struct ServerHello {
 /// 生成 32 字节随机数并做 base64（与 Go `[]byte` 的 JSON 编码一致）。
 pub fn new_crypto_random() -> String {
     let mut buf = [0u8; CRYPTO_RANDOM_SIZE];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut buf)
+        .expect("OS random source failed while generating wire random");
     B64.encode(buf)
 }
 

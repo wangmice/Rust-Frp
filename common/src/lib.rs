@@ -107,6 +107,7 @@ pub mod pprof_http;
 pub mod protocol;
 pub mod proxy_protocol;
 pub mod security;
+pub mod server_resolver;
 pub mod stun;
 pub mod throttle;
 pub mod transport;
@@ -116,6 +117,7 @@ pub mod ws;
 
 pub use error::{Error, Result};
 pub use protocol::ControlMessage;
+pub use server_resolver::resolve_server_addr;
 pub use transport::{PlainTransport, Transport, TunnelIo, TunnelStream};
 
 /// 当前实现的协议版本号（用于日志与后续协商）。

@@ -1038,22 +1038,36 @@ async fn outbound_ip(server: std::net::SocketAddr) -> Option<std::net::IpAddr> {
 
 /// 服务端 QUIC 地址（与 TCP 用同一个端口号，只是走 UDP）。
 async fn quic_server_addr(cfg: &ClientConfig) -> Result<std::net::SocketAddr> {
-    let s = format!("{}:{}", cfg.server_addr, cfg.server_port);
-    util::resolve_addr(&s)
-        .await
-        .with_context(|| format!("解析服务端 QUIC 地址 {s} 失败"))
+    server_addr(cfg).await
+}
+
+/// 控制连接统一入口；保留配置域名供 TLS SNI / WebSocket Host 使用。
+async fn server_addr(cfg: &ClientConfig) -> Result<std::net::SocketAddr> {
+    nfrp_common::server_resolver::resolve_server_addr(
+        &cfg.dns_server,
+        &cfg.server_addr,
+        cfg.server_port,
+    )
+    .await
+    .context("解析服务端地址失败")
 }
 
 /// NLink QUIC 服务端地址：显式 `quic_addr` 优先，否则退回 `server_addr:server_port`。
 async fn nlink_quic_server_addr(cfg: &ClientConfig) -> Result<std::net::SocketAddr> {
-    let s = if cfg.nlink.quic_addr.trim().is_empty() {
-        format!("{}:{}", cfg.server_addr, cfg.server_port)
-    } else {
-        cfg.nlink.quic_addr.trim().to_string()
-    };
-    util::resolve_addr(&s)
+    let raw = cfg.nlink.quic_addr.trim();
+    if raw.is_empty() {
+        return server_addr(cfg).await;
+    }
+    let (host, port) = raw
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("NLink quic_addr 必须是 host:port 或 [IPv6]:port"))?;
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        return Err(anyhow!("NLink quic_addr 的 IPv6 地址必须用方括号包围"));
+    }
+    let port = port.parse::<u16>().context("NLink quic_addr 端口非法")?;
+    nfrp_common::server_resolver::resolve_server_addr(&cfg.dns_server, host, port)
         .await
-        .with_context(|| format!("解析 NLink QUIC 地址 {s} 失败（检查 [nlink] quic_addr）"))
+        .context("解析 NLink QUIC 地址失败（检查 [nlink] quic_addr）")
 }
 
 /// 带 `dialServerTimeout` / `connectServerLocalIP` 的拨号（限制①批次1）。
@@ -1162,22 +1176,8 @@ async fn raw_connect(cfg: &ClientConfig) -> Result<BoxStream> {
         return kcp_connect(cfg).await;
     }
     let server = format!("{}:{}", cfg.server_addr, cfg.server_port);
-    // ★ v0.6.6：配了 `dnsServer` 就用它解析服务端域名；
-    // 没配就走系统 resolver（原路径，行为不变）。
-    let addr = if cfg.dns_server.trim().is_empty() {
-        util::resolve_addr(&server)
-            .await
-            .with_context(|| format!("解析服务端地址 {server} 失败"))?
-    } else {
-        nfrp_common::dns::resolve_addr_via(&cfg.dns_server, &server)
-            .await
-            .with_context(|| {
-                format!(
-                    "用自定义 DNS {} 解析服务端地址 {server} 失败",
-                    cfg.dns_server
-                )
-            })?
-    };
+    // 系统 / 自定义 DNS 共用 TXT -> IP4P -> 普通 A/AAAA 的解析顺序。
+    let addr = server_addr(cfg).await?;
     // ★ v0.6.6：`transport.proxyURL` —— 走出站代理时直接拿到一条已建好的隧道流；
     // 不走代理时保持原样（TcpStream + nodelay）——零回归。
     //
@@ -1196,7 +1196,15 @@ async fn raw_connect(cfg: &ClientConfig) -> Result<BoxStream> {
             %server,
             "通过代理连接服务端"
         );
-        nfrp_common::net_proxy::connect(&cfg.proxy_url, &cfg.server_addr, cfg.server_port, None)
+        let http_proxy = cfg.proxy_url.split_once("://").is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        });
+        let target_host = if addr.is_ipv6() && http_proxy {
+            format!("[{}]", addr.ip())
+        } else {
+            addr.ip().to_string()
+        };
+        nfrp_common::net_proxy::connect(&cfg.proxy_url, &target_host, addr.port(), None)
             .await
             .with_context(|| {
                 format!(
@@ -1316,14 +1324,15 @@ async fn raw_connect(cfg: &ClientConfig) -> Result<BoxStream> {
 /// 服务端要开 `kcp_bind_port`，客户端把 `transport.protocol` 设成 `kcp` 即可；
 /// 上层照旧套 yamux（`tcp_mux`），所以控制连接和工作连接共用这一条 KCP 会话。
 async fn kcp_connect(cfg: &ClientConfig) -> Result<BoxStream> {
-    let server = format!("{}:{}", cfg.server_addr, cfg.server_port);
-    let addr = util::resolve_addr(&server)
-        .await
-        .with_context(|| format!("解析服务端 KCP 地址 {server} 失败"))?;
+    let addr = server_addr(cfg).await?;
     let sock = Arc::new(
-        UdpSocket::bind("0.0.0.0:0")
-            .await
-            .context("绑定本地 UDP 端口失败（KCP 传输需要）")?,
+        UdpSocket::bind(if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })
+        .await
+        .context("绑定本地 UDP 端口失败（KCP 传输需要）")?,
     );
     // conv 由发起方定，服务端从第一个数据报的头里读出来照抄。
     // 用时间戳派生即可，只要保证非零（0 容易被当成无效会话号）。
@@ -2327,6 +2336,122 @@ mod tests {
     //! 谁没被搬过去，断言就会指名道姓地失败。
 
     use super::*;
+
+    #[tokio::test]
+    async fn mixed_case_http_proxy_brackets_ipv6_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cfg = ClientConfig {
+            server_addr: "::1".into(),
+            server_port: 7000,
+            proxy_url: format!("HTTP://{}", listener.local_addr().unwrap()),
+            ..Default::default()
+        };
+        let serve = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+            request
+        };
+        let (connected, request) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(raw_connect(&cfg), serve)
+        })
+        .await
+        .unwrap();
+        connected.unwrap();
+        assert!(String::from_utf8(request)
+            .unwrap()
+            .starts_with("CONNECT [::1]:7000 HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn server_transports_use_txt_endpoint_and_custom_dns() {
+        use base64::Engine as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap();
+        let dns = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dns_addr = dns.local_addr().unwrap();
+        let payload = base64::engine::general_purpose::STANDARD.encode(target.to_string());
+        let responder = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                let (n, peer) = dns.recv_from(&mut buf).await.unwrap();
+                let mut end = 12;
+                while end < n && buf[end] != 0 {
+                    end += usize::from(buf[end]) + 1;
+                }
+                end += 5;
+                let txt = buf[end - 4..end - 2] == [0, 16];
+                let mut reply = buf[..end].to_vec();
+                reply[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+                reply[6..8].copy_from_slice(&u16::from(txt).to_be_bytes());
+                reply[10..12].copy_from_slice(&0u16.to_be_bytes());
+                if txt {
+                    reply.extend_from_slice(&[0xc0, 0x0c, 0, 16, 0, 1, 0, 0, 0, 0]);
+                    reply.extend_from_slice(&((payload.len() + 1) as u16).to_be_bytes());
+                    reply.push(payload.len() as u8);
+                    reply.extend_from_slice(payload.as_bytes());
+                }
+                dns.send_to(&reply, peer).await.unwrap();
+            }
+        });
+        let cfg = ClientConfig {
+            server_addr: "transport-resolver.test.".into(),
+            server_port: 1,
+            dns_server: dns_addr.to_string(),
+            ..Default::default()
+        };
+        let result = async {
+            assert_eq!(quic_server_addr(&cfg).await?, target);
+            assert_eq!(nlink_quic_server_addr(&cfg).await?, target);
+            let mut explicit = cfg.clone();
+            explicit.nlink.quic_addr = "transport-resolver.test.:2".into();
+            assert_eq!(nlink_quic_server_addr(&explicit).await?, target);
+            let _stream = raw_connect(&cfg).await?;
+            let _accepted = listener.accept().await?;
+            let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let mut proxied = cfg.clone();
+            proxied.proxy_url = format!("http://{}", proxy.local_addr()?);
+            let proxy_server = async {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let (mut stream, _) = proxy.accept().await?;
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).await?;
+                    request.push(byte[0]);
+                }
+                assert!(String::from_utf8(request)
+                    .unwrap()
+                    .starts_with(&format!("CONNECT {target} HTTP/1.1\r\n")));
+                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await?;
+                anyhow::Ok(())
+            };
+            let (connected, served) = tokio::join!(raw_connect(&proxied), proxy_server);
+            connected?;
+            served?;
+            let udp = UdpSocket::bind(target).await?;
+            let mut kcp_cfg = cfg.clone();
+            kcp_cfg.transport_protocol = "kcp".into();
+            let mut kcp = raw_connect(&kcp_cfg).await?;
+            use tokio::io::AsyncWriteExt;
+            kcp.write_all(b"endpoint probe").await?;
+            let mut datagram = [0u8; 1500];
+            let (n, _) = udp.recv_from(&mut datagram).await?;
+            assert!(n > 0);
+            assert_eq!(cfg.server_addr, "transport-resolver.test.");
+            anyhow::Ok(())
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), result).await;
+        responder.abort();
+        responder.await.ok();
+        result.unwrap().unwrap();
+    }
 
     #[test]
     fn nlink_quic_门控看运行期开关与编译期能力() {

@@ -287,7 +287,7 @@ fn random_key() -> String {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use rand::RngCore;
     let mut raw = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut raw);
+    rand::rng().fill_bytes(&mut raw);
     STANDARD.encode(raw)
 }
 
@@ -506,7 +506,7 @@ fn build_frame(opcode: u8, payload: &[u8], mask: bool) -> Vec<u8> {
     if mask {
         use rand::RngCore;
         let mut key = [0u8; 4];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         out.extend_from_slice(&key);
         let start = out.len();
         out.extend_from_slice(payload);

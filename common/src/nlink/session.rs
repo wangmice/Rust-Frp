@@ -27,7 +27,7 @@ impl ConnectionId {
     pub fn random() -> Self {
         use rand::RngCore;
         let mut b = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut b);
+        rand::rng().fill_bytes(&mut b);
         // 版本位：与 UUIDv4 同样的布局，方便人眼识别"这是随机 id"
         b[6] = (b[6] & 0x0f) | 0x40;
         b[8] = (b[8] & 0x3f) | 0x80;
@@ -274,7 +274,7 @@ impl ResumeKey {
         let mut nonce = [0u8; 16];
         {
             use rand::RngCore;
-            rand::thread_rng().fill_bytes(&mut nonce);
+            rand::rng().fill_bytes(&mut nonce);
         }
         let sig = self.mac(&resume_message(session, user, client_id, exp, &nonce));
         format!("r1.{exp}.{}.{}", hex(&nonce), hex(&sig))

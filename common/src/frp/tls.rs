@@ -61,7 +61,7 @@ pub fn server_config() -> Result<Arc<rustls::ServerConfig>> {
     let key = rcgen::generate_simple_self_signed(vec!["frp".to_string()])
         .context("生成自签名证书失败")?;
     let cert_der: CertificateDer<'static> = key.cert.der().clone();
-    let key_der = PrivateKeyDer::try_from(key.key_pair.serialize_der())
+    let key_der = PrivateKeyDer::try_from(key.signing_key.serialize_der())
         .map_err(|e| anyhow!("转换私钥失败：{e}"))?;
 
     let cfg = rustls::ServerConfig::builder_with_provider(crypto_provider())
@@ -597,7 +597,7 @@ mod tests {
         let cert = dir.join("cert.pem");
         let key = dir.join("key.pem");
         std::fs::write(&cert, ck.cert.pem()).unwrap();
-        std::fs::write(&key, ck.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&key, ck.signing_key.serialize_pem()).unwrap();
         (
             cert.to_string_lossy().into_owned(),
             key.to_string_lossy().into_owned(),
@@ -622,7 +622,7 @@ mod tests {
     /// 客户端 key、CA cert。
     fn write_mtls_pki(dir: &std::path::Path) -> (String, String, String, String, String) {
         use rcgen::{
-            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
             KeyUsagePurpose,
         };
 
@@ -635,15 +635,14 @@ mod tests {
             KeyUsagePurpose::DigitalSignature,
         ];
         let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let ca_issuer = Issuer::from_params(&ca_params, &ca_key);
 
         let server_key = KeyPair::generate().unwrap();
         let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
         server_params
             .extended_key_usages
             .push(ExtendedKeyUsagePurpose::ServerAuth);
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .unwrap();
+        let server_cert = server_params.signed_by(&server_key, &ca_issuer).unwrap();
 
         let client_key = KeyPair::generate().unwrap();
         let mut client_params =
@@ -651,9 +650,7 @@ mod tests {
         client_params
             .extended_key_usages
             .push(ExtendedKeyUsagePurpose::ClientAuth);
-        let client_cert = client_params
-            .signed_by(&client_key, &ca_cert, &ca_key)
-            .unwrap();
+        let client_cert = client_params.signed_by(&client_key, &ca_issuer).unwrap();
 
         let sc = dir.join("server.pem");
         let sk = dir.join("server-key.pem");

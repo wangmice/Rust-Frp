@@ -384,7 +384,8 @@ impl CryptoStream {
     /// 直接指定派生好的密钥（测试用，能对死官方向量）。
     pub fn with_key(key: [u8; KEY_LEN]) -> Self {
         let mut out_iv = [0u8; IV_LEN];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut out_iv);
+        rand::TryRngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut out_iv)
+            .expect("OS random source failed while generating v1 IV");
         Self {
             key,
             out: None,

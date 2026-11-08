@@ -797,7 +797,7 @@ fn server_config() -> Result<quinn::ServerConfig> {
     let key = rcgen::generate_simple_self_signed(vec![SERVER_NAME.to_string()])
         .context("生成 P2P 自签证书失败")?;
     let cert_der = key.cert.der().clone();
-    let key_der = key.key_pair.serialize_der();
+    let key_der = key.signing_key.serialize_der();
 
     // ALPN 来自 rustls 的配置而不是 quinn 的（quinn 只转发），
     // 所以必须在这里设；两端不一致会报 "peer doesn't support any known protocol"。

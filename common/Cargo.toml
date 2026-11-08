@@ -4,7 +4,7 @@ description = "NFrp 公共库：协议、配置、错误、工具与传输层抽
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-authors.workspace = true
+# authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -19,6 +19,7 @@ default = ["nlink"]
 nlink = []
 
 [dependencies]
+hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 quinn = { workspace = true }
 yamux = { workspace = true }
 rustls = { workspace = true }

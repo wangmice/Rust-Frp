@@ -620,10 +620,12 @@ pub fn hostname() -> String {
 /// 既然项目里其它所有安全随机都走 `OsRng`，这里没有理由用一套更弱的 —
 /// 成本是零（`rand` 本来就是依赖，且 `no_std` 之外都可用）。
 pub fn new_run_id() -> String {
-    use rand::RngCore;
+    use rand::TryRngCore;
 
     let mut buf = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut buf)
+        .expect("OS random source failed while generating random ID");
 
     let mut s = String::with_capacity(32);
     for b in buf {
