@@ -571,16 +571,11 @@ impl ServerCertVerifier for SkipServerVerification {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-        ]
+        // Skipping certificate verification still requires advertising a scheme
+        // compatible with the server's signing key (for example Ed25519).
+        crypto_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 
     fn requires_raw_public_keys(&self) -> bool {
@@ -710,6 +705,65 @@ mod tests {
             }
         }
         false
+    }
+
+    #[tokio::test]
+    async fn skip_verification_connects_to_ed25519_server() {
+        use tokio::io::AsyncWriteExt;
+
+        // Explicitly use Ed25519: rcgen's default ECDSA key would hide a missing
+        // signature scheme in ClientHello, even when verification is disabled.
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+            for disable_custom_first_byte in [false, true] {
+                let server_cfg = rustls::ServerConfig::builder_with_provider(crypto_provider())
+                    .with_protocol_versions(&[version])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![cert.der().clone()],
+                        PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
+                    )
+                    .unwrap();
+                let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
+                let (client_io, mut server_io) = tokio::io::duplex(16 * 1024);
+                let opts = ClientTlsOptions {
+                    enable: true,
+                    server_name: "localhost",
+                    disable_custom_first_byte,
+                    verify: false,
+                    trusted_ca_file: "",
+                    client_cert_file: "",
+                    client_key_file: "",
+                };
+                let server = async {
+                    if !disable_custom_first_byte {
+                        assert_eq!(server_io.read_u8().await.unwrap(), FRP_TLS_HEAD_BYTE);
+                    }
+                    let mut tls = acceptor.accept(server_io).await?;
+                    tls.write_all(b"ed25519").await?;
+                    Ok::<_, std::io::Error>(tls)
+                };
+                let (client, server) = tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(connect_client(client_io, &opts), server)
+                })
+                .await
+                .expect("Ed25519 handshake timed out");
+                assert!(
+                    server.is_ok(),
+                    "{version:?}, disable_custom_first_byte={disable_custom_first_byte}: server={server:?}, client_error={:?}",
+                    client.as_ref().err()
+                );
+                let mut client = client.expect("Ed25519 client handshake should succeed");
+                let mut payload = [0; 7];
+                client.read_exact(&mut payload).await.unwrap();
+                assert_eq!(&payload, b"ed25519");
+            }
+        }
     }
 
     #[test]
