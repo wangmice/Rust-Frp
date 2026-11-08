@@ -451,7 +451,7 @@ fn tunsetiff() -> libc::Ioctl {
 /// `/dev/net/tun` 的 C 字符串（每次调用重建，避免用 `static mut`）。
 fn c_tun_path() -> *const libc::c_char {
     // 尾部 NUL 靠字面量自带
-    b"/dev/net/tun\0".as_ptr() as *const libc::c_char
+    c"/dev/net/tun".as_ptr()
 }
 
 fn set_nonblocking(fd: RawFd) -> anyhow::Result<()> {
